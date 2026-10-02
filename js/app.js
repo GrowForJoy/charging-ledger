@@ -371,7 +371,8 @@
 
     $('#dropzone').hidden = !isOcr;
     $('#btn-pick').hidden = !isOcr;
-    $('#preview-wrap').hidden = true;
+    $('#btn-pick').textContent = '选择图片';
+    resetCropper();
     $('#ocr-progress').hidden = true;
     $('#ocr-bar').style.width = '0';
     $('#ocr-raw-wrap').hidden = true;
@@ -384,22 +385,185 @@
     modal.hidden = false;
   }
 
-  function closeEntry() { $('#modal').hidden = true; }
+  function closeEntry() { resetCropper(); $('#modal').hidden = true; }
 
-  async function handleImage(file) {
+  /* ---------------- 记录弹窗：图片框选识别 ---------------- */
+
+  let cropFile = null;      // 当前选中的原始图片文件
+  let cropSel = null;       // 框选区域（相对图片显示区域）
+  let previewUrl = null;    // 预览用的 blob URL，避免泄漏
+
+  function resetCropper() {
+    cropFile = null;
+    cropSel = null;
+    $('#crop-rect').hidden = true;
+    $('#preview-wrap').hidden = true;
+    if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
+    $('#preview-img').removeAttribute('src');
+  }
+
+  /** 图片选中后：显示预览并允许框选 */
+  function handleImage(file) {
     if (!file) return;
     if (!file.type.startsWith('image/')) { setMsg('请选择图片文件', true); return; }
 
-    const url = URL.createObjectURL(file);
-    $('#preview-img').src = url;
+    cropFile = file;
+    cropSel = null;
+    $('#crop-rect').hidden = true;
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = URL.createObjectURL(file);
+    $('#preview-img').src = previewUrl;
+
+    $('#dropzone').hidden = true;
     $('#preview-wrap').hidden = false;
+    $('#ocr-raw-wrap').hidden = true;
+    $('#ocr-raw').textContent = '';
+    $('#btn-pick').textContent = '重新选择图片';
+    setMsg('请在上方图片上拖出要识别的数字区域，或点「整图自动识别」');
+  }
+
+  function bindCropper() {
+    const stage = $('#crop-stage');
+    const rectEl = $('#crop-rect');
+    const imgEl = $('#preview-img');
+    let dragging = false;
+    let sx = 0, sy = 0;
+
+    // 指针位置 → 图片显示坐标系（同时把 stage 内偏移一并算出）
+    const toLocal = (e) => {
+      const ir = imgEl.getBoundingClientRect();
+      return {
+        x: Math.min(Math.max(e.clientX - ir.left, 0), ir.width),
+        y: Math.min(Math.max(e.clientY - ir.top, 0), ir.height),
+        offX: ir.left - stage.getBoundingClientRect().left,
+        offY: ir.top - stage.getBoundingClientRect().top,
+      };
+    };
+    const paint = (p, x, y, w, h) => {
+      rectEl.hidden = false;
+      rectEl.style.left = (p.offX + x) + 'px';
+      rectEl.style.top = (p.offY + y) + 'px';
+      rectEl.style.width = w + 'px';
+      rectEl.style.height = h + 'px';
+    };
+
+    stage.addEventListener('pointerdown', (e) => {
+      if (!cropFile) return;
+      e.preventDefault();
+      dragging = true;
+      const p = toLocal(e);
+      sx = p.x; sy = p.y;
+      cropSel = null;
+      paint(p, sx, sy, 0, 0);
+      try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+
+    stage.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      e.preventDefault();
+      const p = toLocal(e);
+      const x = Math.min(sx, p.x);
+      const y = Math.min(sy, p.y);
+      const w = Math.abs(p.x - sx);
+      const h = Math.abs(p.y - sy);
+      cropSel = { x, y, w, h };
+      paint(p, x, y, w, h);
+    });
+
+    const endDrag = () => {
+      dragging = false;
+      // 误触产生的极小框视为无效
+      if (cropSel && (cropSel.w < 8 || cropSel.h < 8)) {
+        cropSel = null;
+        rectEl.hidden = true;
+      }
+    };
+    stage.addEventListener('pointerup', endDrag);
+    stage.addEventListener('pointercancel', endDrag);
+
+    $('#btn-crop-kwh').onclick = () => recognizeSelection('kwh');
+    $('#btn-crop-amount').onclick = () => recognizeSelection('amount');
+    $('#btn-full-ocr').onclick = () => fullRecognize();
+  }
+
+  /** 识别框选区域，并把结果填入电量或金额 */
+  async function recognizeSelection(target) {
+    if (!cropFile) { setMsg('请先选择图片', true); return; }
+    if (!cropSel || cropSel.w < 8 || cropSel.h < 8) {
+      setMsg('请先在上方图片上拖出一个框，框住要识别的数字', true);
+      return;
+    }
+
+    const imgEl = $('#preview-img');
+    const ir = imgEl.getBoundingClientRect();
+    const kx = imgEl.naturalWidth / ir.width;
+    const ky = imgEl.naturalHeight / ir.height;
+    const sel = {
+      left: cropSel.x * kx,
+      top: cropSel.y * ky,
+      width: cropSel.w * kx,
+      height: cropSel.h * ky,
+    };
+
+    // 人手框选很难刚好框住整行数字，一旦切掉字的上下沿，Tesseract 就只会吐出残片。
+    // 实测：同一张图框矮一点会读成 ".49."，把框抬高覆盖整字高就稳定读出正确值。
+    // 所以这里把选区向外扩一圈，再把结果夹回图片范围内。
+    const padY = Math.min(Math.max(10, Math.round(sel.height * 0.5)), Math.round(imgEl.naturalHeight * 0.06));
+    const padX = Math.min(Math.max(6, Math.round(sel.width * 0.04)), Math.round(imgEl.naturalWidth * 0.03));
+    const x0 = Math.max(0, sel.left - padX);
+    const y0 = Math.max(0, sel.top - padY);
+    const x1 = Math.min(imgEl.naturalWidth, sel.left + sel.width + padX);
+    const y1 = Math.min(imgEl.naturalHeight, sel.top + sel.height + padY);
+    const region = { left: x0, top: y0, width: x1 - x0, height: y1 - y0 };
+
+    const label = target === 'kwh' ? '电量' : '金额';
     $('#ocr-progress').hidden = false;
     $('#ocr-bar').style.width = '3%';
     $('#modal-save').disabled = true;
-    setMsg('正在识别，首次使用需下载中文识别模型，请稍候…');
+    setMsg(`正在识别框选区域（${label}）…`);
 
     try {
-      const text = await OCR.recognize(file, (p) => {
+      const blob = await OCR.cropToBlob(imgEl, region);
+      const text = await OCR.recognizeDigits(blob, (p) => {
+        $('#ocr-bar').style.width = Math.max(3, Math.round(p * 100)) + '%';
+      });
+      const num = OCR.extractNumber(text);
+
+      if (num == null) {
+        setMsg('框选区域没读出数字，把框拖得更贴紧数字后再试一次', true);
+      } else {
+        if (target === 'kwh') {
+          $('#f-kwh').value = num;
+          const sheet = Store.getSheet($('#f-sheet').value);
+          if ($('#f-amount').value === '' && sheet && Number(sheet.price) > 0) {
+            $('#f-amount').value = (num * Number(sheet.price)).toFixed(2);
+          }
+        } else {
+          $('#f-amount').value = num;
+        }
+        setMsg(`识别到 ${num}，已填入${label}，请对照图片核对`, false);
+      }
+      $('#ocr-raw').textContent = (text || '').trim() || '(无文字)';
+      $('#ocr-raw-wrap').hidden = false;
+    } catch (err) {
+      console.error(err);
+      setMsg('识别失败：' + (err && err.message ? err.message : '未知错误'), true);
+    } finally {
+      $('#ocr-progress').hidden = true;
+      $('#modal-save').disabled = false;
+    }
+  }
+
+  /** 整图自动识别（识别日期、电量、金额、备注） */
+  async function fullRecognize() {
+    if (!cropFile) { setMsg('请先选择图片', true); return; }
+    $('#ocr-progress').hidden = false;
+    $('#ocr-bar').style.width = '3%';
+    $('#modal-save').disabled = true;
+    setMsg('正在识别整张图片，首次使用需下载中文识别模型，请稍候…');
+
+    try {
+      const text = await OCR.recognize(cropFile, (p) => {
         $('#ocr-bar').style.width = Math.max(3, Math.round(p * 100)) + '%';
       });
       const r = OCR.parse(text);
@@ -428,7 +592,7 @@
         }
         setMsg(msg, err);
       } else {
-        setMsg('未能自动识别出电量/金额，请对照图片手动补充', true);
+        setMsg('整图未能识别出电量/金额，请改用上方「框选 → 电量 / 金额」', true);
       }
     } catch (err) {
       console.error(err);
@@ -489,6 +653,7 @@
     // 这个按钮作为备用入口（部分内置浏览器对 label 支持不佳）
     $('#btn-pick').onclick = () => { fi.value = ''; fi.click(); };
     fi.onchange = () => handleImage(fi.files[0]);
+    bindCropper();
     ['dragenter', 'dragover'].forEach((ev) => dz.addEventListener(ev, (e) => {
       e.preventDefault(); dz.classList.add('over');
     }));
@@ -593,7 +758,8 @@
           <h4>日常使用</h4>
           <ol>
             <li>左侧选择台账（公司 / 车牌），中间按日期填写当天每次充电的「电量 / 金额」。</li>
-            <li>点「上传截图识别」，选择充电桩账单截图，自动识别电量与金额，核对后保存。</li>
+            <li>点「上传截图识别」，选择充电桩账单截图。推荐做法：<b>在图片上用鼠标或手指拖一个框，把「充电电量」那一行的数字框住</b>，再点「框选 → 电量」，数字会直接填进电量框；金额同理点「框选 → 金额」。框贴得越紧，识别越准。</li>
+            <li>如果懒得框选，也可以点「整图自动识别」，它会尝试读出日期、电量、金额和备注，但翻拍屏幕的照片准确率较低，务必核对。</li>
             <li>输入电量后未填金额时，会按台账设置的电价自动计算金额。</li>
             <li>右上角 <code>⋮</code> 可导出 Excel / CSV、备份与恢复数据。</li>
           </ol>

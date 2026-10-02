@@ -109,13 +109,22 @@
         <svg viewBox="0 0 24 24" fill="none" class="drop-ico"><path d="M12 16V4m0 0L8 8m4-4 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
         <p class="drop-title">点击或拖入充电桩账单截图</p>
         <p class="drop-sub" id="drop-sub">本地识别，图片不会上传到任何服务器<br>建议使用清晰的手机截图；翻拍屏幕的照片识别率较低，识别后请核对</p>
-        <div class="progress" id="ocr-progress" hidden><div class="progress-bar" id="ocr-bar"></div></div>
-      </label>
+        </label>
       <input type="file" id="file-image" accept="image/*" class="sr-only" />
       <button type="button" class="btn btn-sm" id="btn-pick">选择图片</button>
+      <div class="progress" id="ocr-progress" hidden><div class="progress-bar" id="ocr-bar"></div></div>
 
       <div class="preview" id="preview-wrap" hidden>
-        <img id="preview-img" alt="账单截图预览" />
+        <div class="crop-stage" id="crop-stage">
+          <img id="preview-img" alt="账单截图预览" />
+          <div class="crop-rect" id="crop-rect" hidden></div>
+        </div>
+        <p class="crop-hint">把要识别的数字框住即可：左右各留一点空隙，上下尽量宽松。<br>宁可框大一点，<b>别把数字的上沿或下沿切掉</b>——切掉就会读成残片。</p>
+        <div class="crop-actions">
+          <button type="button" class="btn btn-sm btn-primary" id="btn-crop-kwh">框选 → 电量</button>
+          <button type="button" class="btn btn-sm btn-primary" id="btn-crop-amount">框选 → 金额</button>
+          <button type="button" class="btn btn-sm" id="btn-full-ocr">整图自动识别</button>
+        </div>
       </div>
 
       <div class="form-grid">

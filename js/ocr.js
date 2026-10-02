@@ -106,25 +106,7 @@ const OCR = (() => {
           canvas.height = h;
           const ctx = canvas.getContext('2d');
           ctx.drawImage(img, 0, 0, w, h);
-
-          const data = ctx.getImageData(0, 0, w, h);
-          const p = data.data;
-          let min = 255, max = 0;
-          for (let i = 0; i < p.length; i += 4) {
-            const g = (p[i] * 0.299 + p[i + 1] * 0.587 + p[i + 2] * 0.114) | 0;
-            if (g < min) min = g;
-            if (g > max) max = g;
-          }
-          // 仅当整体对比度偏低时才拉伸，避免过度处理
-          if (max - min > 30) {
-            const range = max - min;
-            for (let i = 0; i < p.length; i += 4) {
-              p[i] = (p[i] - min) * 255 / range;
-              p[i + 1] = (p[i + 1] - min) * 255 / range;
-              p[i + 2] = (p[i + 2] - min) * 255 / range;
-            }
-            ctx.putImageData(data, 0, 0);
-          }
+          contrastStretch(ctx, w, h);
           canvas.toBlob((blob) => done(blob || file), 'image/jpeg', 0.92);
         } catch (e) {
           done(file);
@@ -133,6 +115,119 @@ const OCR = (() => {
       img.onerror = () => done(file);
       img.src = url;
     });
+  }
+
+  /** 对比度拉伸（就地修改像素），仅当整体偏灰时执行 */
+  function contrastStretch(ctx, w, h) {
+    const data = ctx.getImageData(0, 0, w, h);
+    const p = data.data;
+    let min = 255, max = 0;
+    for (let i = 0; i < p.length; i += 4) {
+      const g = (p[i] * 0.299 + p[i + 1] * 0.587 + p[i + 2] * 0.114) | 0;
+      if (g < min) min = g;
+      if (g > max) max = g;
+    }
+    if (max - min <= 30) return;
+    const range = max - min;
+    for (let i = 0; i < p.length; i += 4) {
+      p[i] = (p[i] - min) * 255 / range;
+      p[i + 1] = (p[i + 1] - min) * 255 / range;
+      p[i + 2] = (p[i + 2] - min) * 255 / range;
+    }
+    ctx.putImageData(data, 0, 0);
+  }
+
+  /**
+   * 裁切图片中的一块区域并放大，输出适合做「单行数字」识别的 JPEG Blob。
+   * @param {HTMLImageElement} imgEl 已加载完成的图片元素
+   * @param {{left:number,top:number,width:number,height:number}} r 原图坐标
+   */
+  function cropToBlob(imgEl, r) {
+    return new Promise((resolve) => {
+      try {
+        const sw = Math.max(1, Math.round(r.width));
+        const sh = Math.max(1, Math.round(r.height));
+        // 放大到高度约 130px，Tesseract 在这个字号下对数字最稳
+        const scale = Math.min(8, Math.max(1, 130 / sh));
+        const dw = Math.round(sw * scale);
+        const dh = Math.round(sh * scale);
+        const pad = Math.round(dh * 0.4); // 四周留白，帮助单行切分
+
+        const canvas = document.createElement('canvas');
+        canvas.width = dw + pad * 2;
+        canvas.height = dh + pad * 2;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(imgEl, r.left, r.top, sw, sh, pad, pad, dw, dh);
+        contrastStretch(ctx, canvas.width, canvas.height);
+        canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.95);
+      } catch (e) {
+        resolve(null);
+      }
+    });
+  }
+
+  /* 数字识别专用 worker：只认 0-9 和「.」，并按单行切分，准确率比整图高很多 */
+  let digitWorker = null;
+  let digitProgressCb = null;
+
+  async function getDigitWorker() {
+    if (digitWorker) return digitWorker;
+    digitWorker = await Tesseract.createWorker('eng', 1, {
+      logger: (m) => {
+        if (m.status === 'recognizing text' && digitProgressCb) {
+          digitProgressCb(m.progress || 0);
+        }
+      },
+    });
+    await digitWorker.setParameters({
+      tessedit_char_whitelist: '0123456789.',
+      tessedit_pageseg_mode: '7', // 7 = 单行文本
+    });
+    return digitWorker;
+  }
+
+  /**
+   * 识别「框选出来的数字区域」
+   * @param {Blob} blob 由 cropToBlob 产出
+   * @param {(p:number)=>void} onProgress
+   */
+  async function recognizeDigits(blob, onProgress) {
+    if (typeof Tesseract === 'undefined') {
+      throw new Error('识别库未加载，请检查网络后刷新页面');
+    }
+    if (!blob) return '';
+    const worker = await getDigitWorker();
+    digitProgressCb = onProgress;
+    try {
+      const res = await worker.recognize(blob);
+      return res && res.data ? res.data.text || '' : '';
+    } finally {
+      digitProgressCb = null;
+    }
+  }
+
+  /**
+   * 从单行数字识别结果中取出数值。
+   * 白名单已限制字符集，这里只做常见的「字母被认成数字」纠正。
+   */
+  function extractNumber(text) {
+    if (!text) return null;
+    const s = String(text)
+      .replace(/[，,]/g, '.')
+      .replace(/[OoQ]/g, '0')
+      .replace(/[Il|!]/g, '1')
+      .replace(/[Zz]/g, '2')
+      .replace(/[Ss]/g, '5')
+      .replace(/[Bb]/g, '8')
+      .replace(/[^\d.]/g, '');
+    const ms = s.match(/\d+(?:\.\d+)?/g);
+    if (!ms || !ms.length) return null;
+    // 多段时取最长的，通常就是目标值
+    const pick = ms.reduce((a, b) => (b.replace(/\./g, '').length > a.replace(/\./g, '').length ? b : a));
+    const n = Number(pick);
+    return Number.isFinite(n) ? n : null;
   }
 
   async function runTesseract(input, onProgress) {
@@ -172,5 +267,5 @@ const OCR = (() => {
     return text || '';
   }
 
-  return { recognize, parse, preprocess };
+  return { recognize, parse, preprocess, cropToBlob, recognizeDigits, extractNumber };
 })();
