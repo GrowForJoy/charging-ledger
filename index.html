@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>充电台账 · 每日电量与金额记录</title>
+<meta name="description" content="按公司 / 车牌记录每日充电电量与金额，支持上传充电桩账单截图自动识别填写。" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%2316a34a'/><path d='M55 18 34 56h16l-6 26 22-40H49z' fill='white'/></svg>" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z" fill="currentColor"/></svg>
+    </span>
+    <div class="brand-text">
+      <h1>充电台账</h1>
+      <p>每日充电电量 / 金额记录</p>
+    </div>
+  </div>
+
+  <div class="topbar-actions">
+    <button class="btn btn-primary" id="btn-ocr">
+      <svg viewBox="0 0 24 24" fill="none" class="ico"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      上传截图识别
+    </button>
+    <button class="btn" id="btn-manual">手动记一笔</button>
+
+    <div class="menu-wrap">
+      <button class="btn btn-icon" id="btn-menu" aria-label="更多">
+        <svg viewBox="0 0 24 24" fill="currentColor" class="ico"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg>
+      </button>
+      <div class="menu" id="menu" hidden>
+        <button data-act="export-xlsx">导出 Excel</button>
+        <button data-act="export-csv">导出 CSV</button>
+        <div class="menu-sep"></div>
+        <button data-act="backup">备份数据（JSON）</button>
+        <button data-act="restore">恢复数据（JSON）</button>
+        <div class="menu-sep"></div>
+        <button data-act="help">使用说明 / 部署</button>
+        <button data-act="reset" class="danger">清空全部数据</button>
+      </div>
+    </div>
+    <input type="file" id="file-restore" accept="application/json,.json" hidden />
+  </div>
+</header>
+
+<main class="layout">
+  <!-- 台账列表 -->
+  <aside class="sidebar" id="sidebar">
+    <div class="side-head">
+      <span>台账</span>
+      <button class="btn btn-ghost btn-sm" id="btn-new-sheet">+ 新建</button>
+    </div>
+    <ul class="sheet-list" id="sheet-list"></ul>
+    <p class="side-foot">数据保存在本机浏览器中，换设备不会自动同步。</p>
+  </aside>
+
+  <!-- 主工作区 -->
+  <section class="content">
+    <div class="sheet-bar">
+      <div class="sheet-title">
+        <h2 id="sheet-name">—</h2>
+        <div class="sheet-meta">
+          <label class="meta-inline">车牌 / 单位
+            <input id="sheet-plate" type="text" placeholder="如：化州市聚源运输有限公司" />
+          </label>
+          <label class="meta-inline">电价（元/度）
+            <input id="sheet-price" type="number" step="0.00001" min="0" inputmode="decimal" />
+          </label>
+          <button class="btn btn-ghost btn-sm" id="btn-rename">重命名</button>
+          <button class="btn btn-ghost btn-sm danger" id="btn-del-sheet">删除台账</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="month-bar">
+      <div class="month-nav">
+        <button class="btn btn-icon" id="btn-prev-month" aria-label="上一月">‹</button>
+        <input type="month" id="month-input" />
+        <button class="btn btn-icon" id="btn-next-month" aria-label="下一月">›</button>
+      </div>
+      <div class="month-stats" id="month-stats">
+        <div class="stat"><span class="stat-label">本月总电量</span><span class="stat-value" id="stat-kwh">0</span><span class="stat-unit">kWh</span></div>
+        <div class="stat"><span class="stat-label">本月总金额</span><span class="stat-value" id="stat-amount">0</span><span class="stat-unit">元</span></div>
+        <div class="stat"><span class="stat-label">充电次数</span><span class="stat-value" id="stat-count">0</span><span class="stat-unit">次</span></div>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="ledger" id="ledger"></table>
+    </div>
+    <p class="table-hint">提示：直接点击单元格填写，输入电量后未填金额时会按电价自动计算。</p>
+  </section>
+</main>
+
+<!-- 识别 / 手动记录 弹窗 -->
+<div class="modal" id="modal" hidden>
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-head">
+      <h3 id="modal-title">记录一笔充电</h3>
+      <button class="btn btn-icon" id="modal-close" aria-label="关闭">✕</button>
+    </div>
+
+    <div class="modal-body">
+      <label class="dropzone" id="dropzone" for="file-image">
+        <svg viewBox="0 0 24 24" fill="none" class="drop-ico"><path d="M12 16V4m0 0L8 8m4-4 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        <p class="drop-title">点击或拖入充电桩账单截图</p>
+        <p class="drop-sub" id="drop-sub">本地识别，图片不会上传到任何服务器<br>建议使用清晰的手机截图；翻拍屏幕的照片识别率较低，识别后请核对</p>
+        <div class="progress" id="ocr-progress" hidden><div class="progress-bar" id="ocr-bar"></div></div>
+      </label>
+      <input type="file" id="file-image" accept="image/*" class="sr-only" />
+      <button type="button" class="btn btn-sm" id="btn-pick">选择图片</button>
+
+      <div class="preview" id="preview-wrap" hidden>
+        <img id="preview-img" alt="账单截图预览" />
+      </div>
+
+      <div class="form-grid">
+        <label>台账
+          <select id="f-sheet"></select>
+        </label>
+        <label>日期
+          <input type="date" id="f-date" />
+        </label>
+        <label>第几次
+          <select id="f-slot">
+            <option value="auto">自动（下一个空位）</option>
+            <option value="1">第一次</option>
+            <option value="2">第二次</option>
+            <option value="3">第三次</option>
+            <option value="4">第四次</option>
+            <option value="5">第五次</option>
+          </select>
+        </label>
+        <label>电量（kWh）
+          <input type="number" step="0.001" min="0" inputmode="decimal" id="f-kwh" />
+        </label>
+        <label>金额（元）
+          <input type="number" step="0.01" min="0" inputmode="decimal" id="f-amount" />
+        </label>
+        <label>备注（可选）
+          <input type="text" id="f-note" placeholder="如：用户主动终止" />
+        </label>
+      </div>
+
+      <details class="ocr-raw" id="ocr-raw-wrap" hidden>
+        <summary>识别原文（可校对）</summary>
+        <pre id="ocr-raw"></pre>
+      </details>
+    </div>
+
+    <div class="modal-foot">
+      <span class="modal-msg" id="modal-msg"></span>
+      <div class="modal-foot-actions">
+        <button class="btn" id="modal-cancel">取消</button>
+        <button class="btn btn-primary" id="modal-save">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 弹窗（说明 / 输入） -->
+<div class="modal" id="modal2" hidden>
+  <div class="modal-panel modal-panel-sm" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h3 id="modal2-title">标题</h3>
+      <button class="btn btn-icon" id="modal2-close" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body" id="modal2-body"></div>
+    <div class="modal-foot">
+      <span class="modal-msg"></span>
+      <div class="modal-foot-actions" id="modal2-actions"></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="js/store.js"></script>
+<script src="js/ocr.js"></script>
+<script src="js/export.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
